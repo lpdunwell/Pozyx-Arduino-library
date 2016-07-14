@@ -29,7 +29,7 @@ void setup(){
   }
   
   // read the network id of this device
-  Pozyx.regRead(POZYX_NETWORK_ID, (uint8_t*)&source_id, 2);
+  Pozyx.getNetworkId(&source_id);
 
   // reserve 100 bytes for the inputString:
   inputString.reserve(100);
