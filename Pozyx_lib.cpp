@@ -364,36 +364,51 @@ int PozyxClass::getUWBSettings(UWB_settings_t *UWB_settings, uint16_t remote_id)
 {
   assert(UWB_settings != NULL);
 
+  int status;
+  uint8_t tmp[4];  
+
   if(remote_id == NULL){
-    return regRead(POZYX_UWB_CHANNEL, (uint8_t *) UWB_settings, sizeof(UWB_settings_t));
+    status = regRead(POZYX_UWB_CHANNEL, tmp, 4);
   }
   else{
-    return remoteRegRead(remote_id, POZYX_UWB_CHANNEL, (uint8_t *) UWB_settings, sizeof(UWB_settings_t));
+    status = remoteRegRead(remote_id, POZYX_UWB_CHANNEL, tmp, 4);
   }
+
+  // copy the register data in the UWB_settings structure
+  memcpy((uint8_t *) UWB_settings, tmp, 3);
+  UWB_settings->gain_db = ((float)tmp[3])*0.5f;  
+
+  return status;
 }
 
-int PozyxClass::setUWBSettings(UWB_settings_t UWB_settings, uint16_t remote_id)
+int PozyxClass::setUWBSettings(UWB_settings_t *UWB_settings, uint16_t remote_id)
 {
+  assert(UWB_settings->channel >= 1);
+  assert(UWB_settings->channel <= 7);
+  assert(UWB_settings->channel != 6);
+
   int status;
 
+  // first set the uwb channel, bitrate, prf and plen, this will set gain to the default gain computed for these settings
   if(remote_id == NULL){
-    status = regWrite(POZYX_UWB_CHANNEL, (uint8_t *) &UWB_settings, sizeof(UWB_settings_t));
-    delay(2 * POZYX_DELAY_LOCAL_WRITE);
-    if (status == POZYX_FAILURE){
-      return status;
-    }
-    status = regWrite(POZYX_UWB_GAIN, (uint8_t *) &(UWB_settings.gain), 1);
-    delay(POZYX_DELAY_LOCAL_WRITE);
-  }
-  else{
-    status = remoteRegWrite(remote_id, POZYX_UWB_CHANNEL, (uint8_t *) &UWB_settings, sizeof(UWB_settings_t));
+    status = regWrite(POZYX_UWB_CHANNEL, (uint8_t *) UWB_settings, 3);
+    delay(2 * POZYX_DELAY_LOCAL_WRITE);    
+  }else{
+    status = remoteRegWrite(remote_id, POZYX_UWB_CHANNEL, (uint8_t *) UWB_settings, 3);
     delay(2 * POZYX_DELAY_REMOTE_WRITE);
-    if (status == POZYX_FAILURE){
-      return status;
-    }
-    status = remoteRegWrite(remote_id, POZYX_UWB_GAIN, (uint8_t *) &(UWB_settings.gain), 1);
-    delay(POZYX_DELAY_REMOTE_WRITE);
   }
+
+  if (status == POZYX_FAILURE){
+    return status;
+  }  
+
+  // afterwards, it is possible to set the gain to a custom value
+  if(UWB_settings->gain_db > 0.1){
+    Serial.println(UWB_settings->channel);
+    Serial.println(UWB_settings->gain_db );
+    status = setTxPower(UWB_settings->gain_db, remote_id);
+  }else
+    getTxPower(&(UWB_settings->gain_db), remote_id);
 
   return status;  
 }
@@ -428,17 +443,24 @@ int PozyxClass::getUWBChannel(int* channel_num, uint16_t remote_id)
 int PozyxClass::setTxPower(float txgain_dB, uint16_t remote_id)
 {
   assert(txgain_dB >= 0.0f);
-  assert(txgain_dB <= 35.0f);
+  assert(txgain_dB <= 33.5f);
 
   // convert to an int where one unit is 0.5dB
   uint8_t doublegain_dB = (int)(2.0*txgain_dB + 0.5f);
+  int status;
 
   if(remote_id == NULL){
-    return regWrite(POZYX_UWB_GAIN, &doublegain_dB, 1);
+    status = regWrite(POZYX_UWB_GAIN, &doublegain_dB, 1);
   }
   else{
-    return remoteRegWrite(remote_id, POZYX_UWB_GAIN, &doublegain_dB, 1);
+    status = remoteRegWrite(remote_id, POZYX_UWB_GAIN, &doublegain_dB, 1);
   }
+
+  // give the pozyx system some time to change the power
+  if(status == POZYX_SUCCESS)
+    delay(1);
+
+  return status;
 }
 
 int PozyxClass::getTxPower(float* txgain_dB, uint16_t remote_id)
@@ -909,14 +931,17 @@ void PozyxClass::resetSystem(uint16_t remote_id)
 
 String PozyxClass::getSystemError(uint16_t remote_id)
 {
-  uint8_t error_code;
+  uint8_t error_code, result;
 
   if(remote_id == NULL){
-    regRead(POZYX_ERRORCODE, &error_code, 1); 
+    result = regRead(POZYX_ERRORCODE, &error_code, 1); 
   }
   else{
-    remoteRegRead(remote_id, POZYX_ERRORCODE, &error_code, 1); 
+    result = remoteRegRead(remote_id, POZYX_ERRORCODE, &error_code, 1); 
   }
+
+  if(result != POZYX_SUCCESS)
+    return F("Error: could not connect with the Pozyx device");
 
   switch(error_code)
   {
@@ -953,7 +978,7 @@ String PozyxClass::getSystemError(uint16_t remote_id)
     case POZYX_ERROR_GENERAL:
       return F("Error 0xFF: General error");
     default:
-      return F("Unknonw error");
+      return F("Unknown error");
   }
 
 }
@@ -987,7 +1012,7 @@ int PozyxClass::doRanging(uint16_t destination, device_range_t *range)
   if (status == POZYX_SUCCESS )
   {
     // wait for the result
-    if(waitForFlag(POZYX_INT_STATUS_FUNC, POZYX_DELAY_INTERRUPT))
+    if(waitForFlag_safe(POZYX_INT_STATUS_FUNC, POZYX_DELAY_INTERRUPT))
     {
       // read out the ranging results
       return getDeviceRangeInfo(destination, range);
@@ -1001,28 +1026,30 @@ int PozyxClass::doRanging(uint16_t destination, device_range_t *range)
   
 }
 
-int PozyxClass::doRemoteRanging(uint16_t device_from, uint16_t device_to, device_range_t *device_range)
+int PozyxClass::doRemoteRanging(uint16_t device_from, uint16_t device_to, device_range_t* range)
 {
   assert(device_from != 0);
   assert(device_to != 0);
-  assert(device_range != NULL);
+  assert(range != NULL);
 
   int status;
 
   // trigger remote ranging between the two devices
-  status = remoteRegFunction(device_from, POZYX_DO_RANGING, (uint8_t *) device_to, 2, NULL, 0); 
+  status = remoteRegFunction(device_from, POZYX_DO_RANGING, (uint8_t *)&device_to, 2, NULL, 0); 
   if (status == POZYX_SUCCESS)
   {
-    // the remote device (device_from) will respond with the ranging result, wait for that to happen
-    if(waitForFlag(POZYX_INT_STATUS_RX_DATA , POZYX_DELAY_INTERRUPT))
-    {
+    // the remote device (device_from) will respond with the ranging result, wait for that to happen 
+    if(waitForFlag_safe(POZYX_INT_STATUS_RX_DATA , POZYX_DELAY_INTERRUPT))
+    {      
       // read out the ranging results from the received message
-      return readRXBufferData((uint8_t *) device_range, sizeof(device_range_t));
+      delay(5);
+      return getDeviceRangeInfo(device_to, range, device_from);
+
     }else{
       return POZYX_TIMEOUT;
-    }    
-  }else{
-    return POZYX_FAILURE;
+    }     
+  }else{    
+    return status;
   }
  
 }
@@ -1045,19 +1072,25 @@ int PozyxClass::doPositioning(coordinates_t *position, uint8_t dimension, int32_
   }
   
   // trigger positioning
+  uint8_t int_status = 0;
+  regRead(POZYX_INT_STATUS, &int_status, 1);      // first clear out the interrupt status register by reading from it  
   status = regFunction(POZYX_DO_POSITIONING, NULL, 0, NULL, 0); 
-  if (status == POZYX_SUCCESS )
-  {
-    // wait for positioning to finish
-    if(waitForFlag(POZYX_INT_STATUS_POS, POZYX_DELAY_INTERRUPT)){
-      status = getCoordinates(position);
-      return status;
-    }else{
-      return POZYX_TIMEOUT;
-    }    
-  }
-  else{
+  if (status != POZYX_SUCCESS )
     return POZYX_FAILURE;
+
+  // now wait for the positioning to finish or generate an error  
+  if (waitForFlag_safe(POZYX_INT_STATUS_POS | POZYX_INT_STATUS_ERR, 2*POZYX_DELAY_INTERRUPT, &int_status)){
+    if((int_status & POZYX_INT_STATUS_ERR) == POZYX_INT_STATUS_ERR)
+    {
+      // An error occured during positioning. 
+      // Please read out the register POZYX_ERRORCODE to obtain more information about the error
+      return POZYX_FAILURE;
+    }else{
+      status = getCoordinates(position);
+      return POZYX_SUCCESS;
+    }    
+  }else{
+    return POZYX_TIMEOUT;
   }
 }
 
@@ -1090,10 +1123,10 @@ int PozyxClass::doRemotePositioning(uint16_t remote_id, coordinates_t *coordinat
   status = remoteRegFunction(remote_id, POZYX_DO_POSITIONING, NULL, 0, NULL, 0); 
 
   if(status != POZYX_SUCCESS){
-    
+    return status;
   }
 
-  if (waitForFlag(POZYX_INT_STATUS_RX_DATA , 500)){
+  if (waitForFlag_safe(POZYX_INT_STATUS_RX_DATA , 500)){
 
     // we received a response, now get some information about the response
     uint8_t rx_info[3]= {0,0,0};
@@ -1172,9 +1205,17 @@ int PozyxClass::getPositioningAnchorIds(uint16_t anchors[], int anchor_num, uint
 int PozyxClass::getDeviceIds(uint16_t devices[],int size, uint16_t remote_id)
 {
   assert(size > 0);
-  assert(size <= 20);
+  // the limit on size is 20, however, due to the Arduino i2c library the limit depends on the i2c buffer size
+  // see github issue #6, thanks to lpdunwell
+  assert((BUFFER_LENGTH > 32 && size <= 20) || (size <= 15)); 
 
   int status;
+
+  // verify that the device list has at least the requested number of devices
+  uint8_t list_size = 0;
+  status = getDeviceListSize(&list_size, remote_id);
+  if(status == POZYX_FAILURE || list_size < size)
+    return POZYX_FAILURE;
 
   if(remote_id == NULL){
     status = regFunction(POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, size * 2); 
@@ -1193,30 +1234,45 @@ int PozyxClass::getAnchorIds(uint16_t anchors[],int size, uint16_t remote_id)
   assert(size <= 20);
 
   int status;
-  uint16_t devices[size];
 
+  // verify that the device list has at least the requested number of devices
+  uint8_t list_size = 0;
+  status = getDeviceListSize(&list_size, remote_id);
+  if(status == POZYX_FAILURE || list_size < size)
+    return POZYX_FAILURE;
+
+  // read out all the devices in the device list
+  uint16_t devices[list_size];
   if(remote_id == NULL){
-    status = regFunction(POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, size * 2); 
+    status = regFunction(POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, list_size * sizeof(uint16_t)); 
     delay(POZYX_DELAY_LOCAL_FUNCTION);
   }
   else{
-    status = remoteRegFunction(remote_id, POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, MAX_ANCHORS_IN_LIST * 2);  
+    status = remoteRegFunction(remote_id, POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, list_size * sizeof(uint16_t));  
     delay(POZYX_DELAY_REMOTE_FUNCTION);
   }
 
+  // filter out the devices that are an anchor
   if(status == POZYX_SUCCESS){
     for (int i=0; i < size ; i++){
       anchors[i] = 0x0;
     }
     int j = 0;
-    for (int i=0; i < size ; i++){
-      uint8_t mode = 0x0;
-      status &= getOperationMode(&mode, devices[i]);
-      if(mode == POZYX_ANCHOR_MODE){
+    for (int i=0; i < list_size ; i++){
+
+      // read out the type of device, for this we only need to read out the first 3 bytes from POZYX_DEVICE_GETINFO
+      // the third byte will be the special flag describing the device.
+      uint8_t data[3] = {0,0,0};
+      regFunction(POZYX_DEVICE_GETINFO, (uint8_t*)&devices[i], 2, data, 3);
+      if(data[2] == POZYX_ANCHOR_MODE+1){  
         anchors[j] = devices[i];
         j++;
       }
     }
+
+    // ultimately, we didn't find enough Anchors, so we give an error
+    if(j<size)
+      return POZYX_FAILURE;
   }
   return status;
 }
@@ -1227,30 +1283,45 @@ int PozyxClass::getTagIds(uint16_t tags[],int size, uint16_t remote_id)
   assert(size <= 20);
 
   int status;
-  uint16_t devices[size];
 
+  // verify that the device list has at least the requested number of devices
+  uint8_t list_size = 0;
+  status = getDeviceListSize(&list_size, remote_id);
+  if(status == POZYX_FAILURE || list_size < size)
+    return POZYX_FAILURE;
+
+  // read out all the devices in the device list
+  uint16_t devices[list_size];
   if(remote_id == NULL){
-    status = regFunction(POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, size * 2); 
+    status = regFunction(POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, list_size * sizeof(uint16_t)); 
     delay(POZYX_DELAY_LOCAL_FUNCTION);
   }
   else{
-    status = remoteRegFunction(remote_id, POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, MAX_ANCHORS_IN_LIST * 2);  
+    status = remoteRegFunction(remote_id, POZYX_DEVICES_GETIDS, NULL, 0, (uint8_t *) devices, list_size * sizeof(uint16_t));  
     delay(POZYX_DELAY_REMOTE_FUNCTION);
   }
 
+  // filter out the devices that are a tag
   if(status == POZYX_SUCCESS){
     for (int i=0; i < size ; i++){
       tags[i] = 0x0;
     }
     int j = 0;
-    for (int i=0; i < size ; i++){
-      uint8_t mode = 0x0;
-      status &= getOperationMode(&mode, devices[i]);
-      if(mode == POZYX_TAG_MODE){
+    for (int i=0; i < list_size ; i++){
+
+      // read out the type of device, for this we only need to read out the first 3 bytes from POZYX_DEVICE_GETINFO
+      // the third byte will be the special flag describing the device.
+      uint8_t data[3] = {0,0,0};
+      regFunction(POZYX_DEVICE_GETINFO, (uint8_t*)&devices[i], 2, data, 3);
+      if(data[2] == POZYX_TAG_MODE+1){  
         tags[j] = devices[i];
         j++;
       }
     }
+
+    // ultimately, we didn't find enough tags, so we give an error
+    if(j<size)
+      return POZYX_FAILURE;
   }
   return status;
 }
@@ -1269,30 +1340,38 @@ int PozyxClass::doDiscovery(int type, int slots, int slot_duration)
   params[1] = (uint8_t)slots;
   params[2] = (uint8_t)slot_duration;
 
-
+  uint8_t int_status = 0;
+  regRead(POZYX_INT_STATUS, &int_status, 1);      // first clear out the interrupt status register by reading from it  
   status = regFunction(POZYX_DEVICES_DISCOVER, (uint8_t *)&params, 3, NULL, 0);
-  if (status == POZYX_SUCCESS && waitForFlag(POZYX_INT_STATUS_FUNC, POZYX_DELAY_INTERRUPT)){
+  if (status != POZYX_SUCCESS)
     return status;
+  
+  // now wait for the discovery to finish or generate an error  
+  int timeout_ms = slot_duration*(slots+20);
+  if (waitForFlag_safe(POZYX_INT_STATUS_FUNC | POZYX_INT_STATUS_ERR, timeout_ms, &int_status)){
+    if((int_status & POZYX_INT_STATUS_ERR) == POZYX_INT_STATUS_ERR)
+    {
+      // An error occured during auto calibration. 
+      // Please read out the register POZYX_ERRORCODE to obtain more information about the error
+      return POZYX_FAILURE;
+    }else{
+      return POZYX_SUCCESS;
+    }    
   }
   else{
     return POZYX_TIMEOUT;
   }
-  return status;
+ 
 }
 
 int PozyxClass::doAnchorCalibration(int dimension, int num_measurements, int num_anchors, uint16_t anchors[],  int32_t heights[])
 {
   assert( (dimension == POZYX_2D ) || (dimension == POZYX_2_5D));
   assert( num_measurements > 0);
-  assert( num_anchors >= 3);
+  assert( num_anchors >= 0);
   assert( num_anchors <= 6);
 
   int status;
-
-  if (num_anchors < 0 || num_anchors > 6)
-    return POZYX_FAILURE;
-  if(dimension != POZYX_2D && dimension != POZYX_2_5D)
-    return POZYX_FAILURE;
 
   // in 2.5D mode, we must supply the heights of all the anchors
   if(dimension == POZYX_2_5D){
@@ -1308,27 +1387,30 @@ int PozyxClass::doAnchorCalibration(int dimension, int num_measurements, int num
     }
   } 
 
-/*
-  Serial.println("devices added");
-  uint8_t list_size = 0;
-  status = Pozyx.getDeviceListSize(&list_size);
-  Serial.print("list size: ");
-  Serial.println(status*list_size);
-*/
-
+  // prepare the register function call
   uint8_t params[2 + num_anchors * sizeof(uint16_t)];
   params[0] = (uint8_t)dimension;
   params[1] = (uint8_t)num_measurements;
-
   if (num_anchors > 0){
     memcpy(params+2, (uint8_t*)anchors, num_anchors * sizeof(uint16_t));
   }
 
+  uint8_t int_status = 0;
+  regRead(POZYX_INT_STATUS, &int_status, 1);      // first clear out the interrupt status register by reading from it  
   status = regFunction(POZYX_DEVICES_CALIBRATE, (uint8_t *)&params, 2 + num_anchors * sizeof(uint16_t), NULL, 0);
-  Serial.println(status);
-  delay(POZYX_DELAY_LOCAL_FUNCTION);
-  if (status == POZYX_SUCCESS && waitForFlag(POZYX_INT_STATUS_FUNC, 25000)){
-    return POZYX_SUCCESS;
+  if(status != POZYX_SUCCESS)
+    return POZYX_FAILURE;
+
+  // now wait for the function to finish, or generate an error  
+  if (waitForFlag_safe(POZYX_INT_STATUS_FUNC | POZYX_INT_STATUS_ERR, 25000, &int_status)){
+    if((int_status & POZYX_INT_STATUS_ERR) == POZYX_INT_STATUS_ERR)
+    {
+      // An error occured during auto calibration. 
+      // Please read out the register POZYX_ERRORCODE to obtain more information about the error
+      return POZYX_FAILURE;
+    }else{
+      return POZYX_SUCCESS;
+    }    
   }
   else{
     return POZYX_TIMEOUT;

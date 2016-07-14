@@ -85,10 +85,8 @@ typedef struct __attribute__((packed))_UWB_settings {
     * See the reg:POZYX_UWB_PLEN register for more information.
     */ 
     uint8_t plen;                   
-    /** the transmit gain. The gain is given in double dBm, i.e., a gain of 2 equals 1dBm. See the reg:POZYX_UWB_GAIN register for more information.*/
-    int8_t gain;                    
-    /** The trim value for the UWB transceiver clock. The value must be lower than 32. See the reg:POZYX_UWB_XTALTRIM register for more information.*/
-    unsigned trim:8;                
+    /** The transmission gain in dB. Possible values are between 0dB and 33.5dB, with a resolution of 0.5dB. See the reg:POZYX_UWB_GAIN register for more information.*/
+    float gain_db;                                  
 }UWB_settings_t;
 
 /**
@@ -281,6 +279,19 @@ private:
     * Internal function that sets the _interrupt variable on an Arduino interrupt
     */
     static void IRQ(); 
+
+    /**    
+    * This function calls the waitForFlag function in polling mode. After this, the previous mode is reset.
+    * 
+    *   @param interrupt_flag the exepected Pozyx interrupt. Possible values are #POZYX_INT_STATUS_ERR, 
+    *   #POZYX_INT_STATUS_POS, #POZYX_INT_STATUS_IMU, #POZYX_INT_STATUS_RX_DATA, #POZYX_INT_STATUS_FUNC, or combinations.  
+    *   @param timeout_ms maximum waiting time in milliseconds for flag to occur
+    *   @param interrupt a pointer that will contain the value of the interrupt status register
+    *
+    * @retval #true event occured.
+    * @retval #false event did not occur, this function timed out.
+    */
+    static boolean waitForFlag_safe(uint8_t interrupt_flag, int timeout_ms, uint8_t *interrupt = NULL);   
    
 
 public:
@@ -298,11 +309,12 @@ public:
     *   @param interrupt_flag the exepected Pozyx interrupt. Possible values are #POZYX_INT_STATUS_ERR, 
     *   #POZYX_INT_STATUS_POS, #POZYX_INT_STATUS_IMU, #POZYX_INT_STATUS_RX_DATA, #POZYX_INT_STATUS_FUNC, or combinations.  
     *   @param timeout_ms maximum waiting time in milliseconds for flag to occur
+    *   @param interrupt a pointer that will contain the value of the interrupt status register
     *
     * @retval #true event occured.
     * @retval #false event did not occur, this function timed out.
     */
-    static boolean waitForFlag(uint8_t interrupt_flag, int timeout_ms);     
+    static boolean waitForFlag(uint8_t interrupt_flag, int timeout_ms, uint8_t *interrupt = NULL);     
 
     /**
     * Initiates the Pozyx shield. This function initializes the pozyx device. 
@@ -533,14 +545,14 @@ public:
     * In order to communicate, two pozyx devices must have exactly the same UWB settings.
     * Upon reset, the default UWB settings will be loaded.
     *
-    *   @param UWB_settings the new UWB settings
+    *   @param UWB_settings reference to the new UWB settings. If the gain_db is set to 0, it will automatically load the default gain value for the given uwb paramters.
     *   @param remote_id optional parameter that determines the remote device to be used
     *
     * @retval #POZYX_SUCCESS success.
     * @retval #POZYX_FAIL function failed.
     * @retval #POZYX_TIMEOUT function timed out, no response received.
     */
-    static int setUWBSettings(UWB_settings_t UWB_settings, uint16_t remote_id = NULL);
+    static int setUWBSettings(UWB_settings_t *UWB_settings, uint16_t remote_id = NULL);
 
     /**
     * Set the Ultra-wideband frequency channel.
@@ -581,7 +593,7 @@ public:
     * transmitter and the receiver must set the appropriate transmit power.
     * Changing the UWB channel will reset the power to the default value.
     *
-    *   @param txgain_dB the transmission gain in dB. Possible values are between 0dB and 35dB, with a resolution of 0.5dB.
+    *   @param txgain_dB the transmission gain in dB. Possible values are between 0dB and 33.5dB, with a resolution of 0.5dB.
     *   @param remote_id optional parameter that determines the remote device to be used.
     *
     * @retval #POZYX_SUCCESS success.
@@ -596,7 +608,7 @@ public:
     * This function obtains the configured UWB transmission power gain. The default value is different for each UWB channel.
     * Changing the UWB channel will reset the TX power to the default value.
     *
-    *   @param txgain_dB the configured transmission gain in dB. Possible values are between 0dB and 35dB, with a resolution of 0.5dB.
+    *   @param txgain_dB the configured transmission gain in dB. Possible values are between 0dB and 33.5dB, with a resolution of 0.5dB.
     *   @param remote_id optional parameter that determines the remote device to be used.
     *
     * @retval #POZYX_SUCCESS success.
@@ -1374,7 +1386,7 @@ public:
     *
     * @see doRanging, getDeviceRangeInfo
     */
-    static int doRemoteRanging(uint16_t device_from, uint16_t device_to, device_range_t *device_range);
+    static int doRemoteRanging(uint16_t device_from, uint16_t device_to, device_range_t *range);
 
     /**
     * Retrieve stored ranging information.
@@ -1421,7 +1433,7 @@ public:
     * @retval #POZYX_SUCCESS success.
     * @retval #POZYX_FAIL function failed.
     */
-    static int getDeviceIds(uint16_t devices[], int size = MAX_ANCHORS_IN_LIST, uint16_t remote_id = NULL);
+    static int getDeviceIds(uint16_t devices[], int size, uint16_t remote_id = NULL);
 
     /**
     * Obtain the network IDs from all the anchors in the device list.
@@ -1434,7 +1446,7 @@ public:
     * @retval #POZYX_SUCCESS success.
     * @retval #POZYX_FAIL function failed.
     */
-    static int getAnchorIds(uint16_t anchors[], int size = MAX_ANCHORS_IN_LIST, uint16_t remote_id = NULL);
+    static int getAnchorIds(uint16_t anchors[], int size, uint16_t remote_id = NULL);
     
     /**
     * Obtain the network IDs from all the tags in the device list.
@@ -1447,7 +1459,7 @@ public:
     * @retval #POZYX_SUCCESS success.
     * @retval #POZYX_FAIL function failed.
     */
-    static int getTagIds(uint16_t tags[], int size = MAX_ANCHORS_IN_LIST, uint16_t remote_id = NULL);
+    static int getTagIds(uint16_t tags[], int size, uint16_t remote_id = NULL);
 
     /**
     * Discover Pozyx devices in range.
